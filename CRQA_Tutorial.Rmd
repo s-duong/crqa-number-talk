@@ -1,0 +1,466 @@
+---
+title: "Exploring the dynamics of dyadic conversations using categorical cross-recurrence quantification analysis"
+author: "By: [NAME REDACTED]"
+date: "Last updated: 02/04/24"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+
+This document contains a tutorial on categorical cross-recurrence quantification analysis (CRQA) using the ['crqa' package](https://cran.r-project.org/web/packages/crqa/crqa.pdf) ([Coco et al., 2021](https://journal.r-project.org/archive/2021/RJ-2021-062/RJ-2021-062.pdf)) as part of the paper, "Exploring dynamic structures of dyadic interactions using categorical cross recurrence quantification analysis" by [NAMES REDACTED]. Utterance-level data of caregiver-child conversations involving number- and math-related conversations (i.e., number talk) were used as examples. 
+
+
+Import libraries.
+
+```{r}
+# data manipulation, plotting
+library(tidyverse)  
+library(reshape) # for melting data to generate recurrence plots
+
+# descriptives 
+library(psych) 
+
+# displays
+library(knitr) 
+
+# recurrence analysis
+library(crqa)
+
+# function writing
+library(lazyeval) 
+```
+
+
+# Data set-up
+
+Import data. 
+
+```{r}
+d <- read.csv("Transcription_Data_Tutorial.csv") 
+```
+
+This dataframe contains utterance-level data from caregiver-child conversations involving number talk. The caregiver will be referred to as "parent" moving forward.
+
+Variable descriptions:
+
+* `ID`: Dyad identifier
+* `timepoint`: The order in which the parent or child utterance appeared in the conversation; takes on values of 1 to the total number of utterances spoken in each interaction
+* `speaker`: The person who uttered (**p** = *parent*, **c** = *child*)
+* `number_talk`: Whether number talk occurred in the corresponding utterance (0 = **no**, 1 = **yes**)
+* `transcript`: Speech content
+
+
+```{r}
+glimpse(d)
+```
+
+Recode data into event states for the parent and child.
+
+* 1 = **number talk by either speaker**
+* 2 = **no utterance by either speaker during number talk of the other speaker**
+* 3 = **caregiver non-number talk**
+* 4 = **child non-number talk** 
+* 5 = **no utterance by the caregiver during non-number talk of the child**
+* 6 = **no utterance by the child during non-number talk of the caregiver**
+
+The `parent_data` variable can take on codes 1, 2, 3, and 5. The `child_data` variable can take on codes 1, 2, 4, and 6. Since the primary event of interest was number talk and CRQA is concerned with when events co-occur, we forced non-recurrence for other types of talk. This is why caregiver non-number talk is given a different code than child non-number talk. 
+
+
+```{r}
+d <- d %>%
+  mutate(parent_data = ifelse(speaker == "p" & number_talk == 1, 1,
+                               ifelse(speaker == "p" & number_talk == 0, 3, 
+                                      ifelse(speaker == "c" & number_talk == 1, 2, 5))),
+         child_data = ifelse(parent_data == 1, 2,
+                           ifelse(parent_data == 3, 6,
+                                  ifelse(parent_data == 5, 4, 1)))
+         )
+```
+
+Double check that each variable only contains valid codes.
+
+```{r}
+levels(as.factor(d$parent_data))
+```
+
+
+```{r}
+levels(as.factor(d$child_data))
+```
+
+Double check the the correct codes "mirror" each other. If the parent/child event code = 1, then the child/parent event code = 2. If the parent event code = 3, then the child event code = 6. If the child event code = 4, then the child event code = 5.
+
+There are many ways to do this. This method calculates the number of correct "mirrors" and then filters the data to only show incorrect "mirrors." If all is well, then we should see 0 rows of data.
+
+```{r}
+d %>% mutate(check_1_2 = ifelse(parent_data == 1 & child_data == 2, 1, 0),
+             check_2_1 = ifelse(child_data == 1 & parent_data == 2, 1, 0),
+             check_3_6 = ifelse(parent_data == 3 & child_data == 6, 1, 0),
+             check_5_4 = ifelse(parent_data == 5 & child_data == 4, 1, 0),
+             sum_check = check_1_2 + check_2_1 + check_3_6 + check_5_4
+             ) %>%
+  filter(sum_check == 0)
+```
+
+We're good!
+
+
+
+# Recurrence plots (RPs) and metrics
+
+Specify hyperparameters. For this tutorial, we use a radius (`radius` argument in `crqa()`) of .5, a delay (`delay`) of 0, and an embedded dimension (`embed`) of 1.
+
+```{r}
+radius_value = .5
+delay_value = 0
+embedding_value = 1
+```
+
+Specify minimum diagonal and vertical length of recurrent points.
+
+```{r}
+min_diag = 2
+min_vert = 2
+```
+
+
+## Recurrence metrics
+
+* **Recurrence rate** (`RR`): Percentage of recurrent points in a RP. How often is number talk co-occurring? What is the extent to which dyads are aligned in using number talk?
+* **Determinism** (`DET`): Percentage of recurrent points that form diagonal lines. How often do speakers follow each others' number utterances or engage in "back and forth" exchanges of number talk?
+* **Average diagonal line** (`meanL`) - Mean length of diagonal lines or number exchanges.
+* **Laminarity** (`LAM`) -- Percentage of recurrent points that form vertical (or horizontal, since we forced non-recurrence) lines. How often does one speaker use consecutive number utterances after the other person introduces or uses number talk?
+* **Trapping time** (`TT`) - Average length of vertical lines.  
+
+
+
+## Extract example dyads
+
+A total of four dyads are chosen as examples. One pair of dyads (`ID` = "Dyad1", "Dyad2") has similar frequencies of total number talk, but different values on the recurrence metrics. Another pair of dyads (`ID` = "Dyad3", "Dyad4") has similar recurrence rates and different values on other recurrence metrics.
+
+```{r}
+ex_dyads <- c("Dyad1", "Dyad2", "Dyad3", "Dyad4")
+```
+
+
+Calculate frequencies of talk.
+
+```{r}
+d_summary <- d %>% 
+  group_by(ID, speaker) %>%
+  summarise(utterances = max(1:n()),
+            number_talk = sum(number_talk)
+            ) %>%
+  pivot_wider(id_cols = "ID",
+              values_from = c("utterances", "number_talk"),
+              names_from = "speaker") %>%
+  mutate(utterances_total = utterances_c + utterances_p,
+         number_talk_total = number_talk_c + number_talk_p)
+```
+
+Show frequencies of talk in example interactions.
+
+```{r}
+d_summary %>%
+  filter(ID %in% ex_dyads) %>%
+  select(ID, # rearrange columns
+         utterances_c, utterances_p, utterances_total,
+         number_talk_c, number_talk_p, number_talk_total)
+```
+
+
+## Apply CRQA
+
+Use the `crqa()` function to obtain recurrence plots and metrics. Since this tutorial uses a dataset with multiple dyads, the data need to be subset to only include the dyad of interest. If you only have one dyad and two vectors, say `toy_parent` and `toy_child`, then you can simply write `crqa(toy_parent, toy_child)` to run the function (see the next section for this example).
+
+
+### Toy example
+
+```{r}
+# parent and child event series
+toy_parent <- c(3, 2, 1, 1, 2, 1, 3, 5, 1, 2, 1, 1, 5, 1, 1)
+toy_child <- c(6, 1, 2, 2, 1, 2, 6, 4, 2, 1, 2, 2, 4, 2, 2)
+
+# run crqa
+example_crqa <- crqa(toy_parent,
+                     toy_child,
+                     radius = radius_value,
+                     delay = delay_value, 
+                     embed = embedding_value, 
+                     mindiagline = min_diag, 
+                     minvertline = min_vert 
+                     )
+
+# show output
+example_crqa 
+```
+
+
+### Example dyad 1
+
+
+```{r}
+crqa(d[d$ID == "Dyad1",]$parent_data, # base R way
+     d[d$ID == "Dyad1",]$child_data)
+```
+
+
+### Example dyad 2
+
+
+```{r}
+crqa(d %>% filter(ID == "Dyad2") %>% select(parent_data), # dplyr way
+     d %>% filter(ID == "Dyad2") %>% select(child_data))
+```
+
+
+### Example dyad 3
+
+
+```{r}
+crqa(d %>% filter(ID == "Dyad3") %>% select(parent_data),
+     d %>% filter(ID == "Dyad3") %>% select(child_data))
+```
+
+
+### Example dyad 4
+
+
+```{r}
+crqa(d %>% filter(ID == "Dyad4") %>% select(parent_data),
+     d %>% filter(ID == "Dyad4") %>% select(child_data))
+```
+
+
+
+## Obtain RPs (using `crqa()`)
+
+Use the `$` operator to extract the `RP`. This is large and hard to read. 
+
+```{r}
+crqa(d %>% filter(ID == "Dyad1") %>% select(parent_data),
+     d %>% filter(ID == "Dyad1") %>% select(child_data))$RP
+```
+
+
+
+## Obtain RPs (using `ggplot()`)
+
+Transform the sparse matrices generated from the `crqa()` function into more visually appealing RPs. 
+
+
+### Toy example
+
+Generate the RP of the example data to show the process and output. 
+
+
+First, extract the RP from the example and reshape the data so that there are 3 columns: the parent event series, the child event series, and `value` which indicates whether each pair of parent-child utterances is a recurrent point. Also, the number of rows should equal the square of the length of the event series. In this case, it's 15 squared or 225.
+
+```{r}
+# extract RP from the crqa output
+recurrence_matrix <- melt(as.matrix(example_crqa$RP), 
+                          varnames = c("toy_child", "toy_parent"))
+
+recurrence_matrix %>% glimpse()
+```
+
+Then, use ggplot's `geom_raster()` to generate the RP (showing the *recurrence* of number talk).
+
+```{r}
+recurrence_plot <- recurrence_matrix %>%
+  ggplot(mapping = aes(x = toy_parent, 
+                       y = toy_child, 
+                       fill = value)  
+         ) +
+  geom_raster() + 
+  scale_fill_manual(values=c("purple", # purple for recurrent points
+                             "#F5F5F5"), # gray for non-recurrence points
+                    breaks=c(TRUE, FALSE)) +
+  geom_abline(intercept = 0, slope = 1) # add line of incidence
+
+# show plot
+recurrence_plot
+```
+
+Generate the data for the rugs (showing the *occurrence* of number talk for each speaker) and then add to the RP.
+
+```{r}
+# first combine event series into a data frame
+plot_data <- cbind(toy_parent, toy_child) %>%   
+  as.data.frame() %>%
+  rowid_to_column("utterance_order") %>% 
+  mutate(x_binary = ifelse(toy_parent == 1, utterance_order, NA), # NA to ensure no rug mark appears when number talk is *not* being used
+         y_binary = ifelse(toy_child == 1, utterance_order, NA)
+         ) %>%
+  # add rug colors for each speaker
+  mutate(rug_color = ifelse(!is.na(x_binary) & is.na(y_binary), "red", # child
+                            ifelse(!is.na(y_binary) & is.na(x_binary), "blue", NA) # parent
+                            )
+         )
+
+# add rugs to the axes
+recurrence_plot <- recurrence_plot + 
+  geom_rug(inherit.aes = FALSE, # ensure that the mapping from above does not get combined
+           data = plot_data,
+           mapping = aes(x = x_binary, 
+                         y = y_binary,
+                         color = rug_color)) +
+  scale_color_manual(values=c("red", # red for child
+                              "blue")) # blue for parent
+
+# show plot
+recurrence_plot
+```
+
+Adjust the RP aesthetics and display the plot.
+
+```{r rp example aes}
+recurrence_plot <- recurrence_plot +
+  # adjust RP aesthetics
+  theme(axis.line = element_blank(), # remove axis lines/tick marks
+        legend.position = "none") +  # remove legend
+  coord_equal() + # make square
+  labs(x = "Parent data series", y = "Child data series") # add axis labels
+
+# show plot
+recurrence_plot
+```
+
+
+**Reading the RPs**:
+
+-   The parent event series is plotted along the x-axis and the child event series is plotted along the y-axis.
+-   The blue (parent) and red (child) rug marks (thin lines) along the axes represent whether a number utterance occurred at a particular point in time. This can be summarized to show the *frequency* of number talk.
+-   The purple areas on the plot represent when number talk co-occurred. This can be summarized to show the *reciprocity* of number talk.
+-   The black diagonal line is the line of incidence, which reflects when talk occurs at the same moment in time. In our case of conversational exchanges, recurrence along this line is not present, so this appears on the plot just for reference.
+
+
+
+
+### Create RP function
+
+Create a function since this is going to be used a bunch of times. This function takes in data from multiple dyads and subsets to the `chosen_dyad`. This function assumes that the hyperparameters were already set.
+
+Also, if there is no recurrence (i.e., RR = 0), then the `crqa()` function returns a "logical" class of `RP`. Thus, this function also generates an appropriate plot for when there RR = 0.
+
+
+```{r rp function}
+make_recurrence_plot <- function(data, chosen_dyad){
+  
+  # subset data
+  d_use <- data %>% filter(ID == chosen_dyad)
+  
+  # run crqa
+  crqa_output <- crqa(d_use$parent_data,
+                      d_use$child_data,
+                      radius = radius_value, 
+                      delay = delay_value, 
+                      embed = embedding_value,
+                      mindiagline = min_diag,
+                      minvertline = min_vert)
+  
+  # extract recurrence plot from crqa output
+  if(class(crqa_output$RP) == "logical"){ # if RR = 0...
+    
+    # the crqa() function does not supply an RP if there is no recurrence
+    # in these cases, the class of $RP is "logical", not a matrix
+    # so we need to supply a matrix for these cases
+    # the matrix needs to have the same dimensions as the total number of utterances in the conversation
+    
+    child_data_zeroRR <- c(1:nrow(d_use))
+    parent_data_zero_RR <- c(1:nrow(d_use))
+    
+    # generate all possible combinations of time points 
+    recurrence_matrix <- expand.grid(child_data_zeroRR, parent_data_zero_RR) %>%
+      as.data.frame() %>%
+      mutate(value = FALSE) %>% # specify no recurrence at all pairs of time points
+      dplyr::rename(child_data = Var1,
+                    parent_data = Var2)
+   
+  } else {
+    # else use the RP provided by crqa() and reshape data
+    recurrence_matrix <- melt(as.matrix(crqa_output$RP), 
+                          varnames = c("child_data", "parent_data"))
+    
+  }
+  
+  
+  # generate rp using geom_raster()
+  recurrence_plot <- recurrence_matrix %>%
+  ggplot(mapping = aes(x = parent_data, 
+                       y = child_data, 
+                       fill = value)  
+         ) +
+  geom_raster() + 
+  scale_fill_manual(values=c("#a269db", # purple for recurrent points
+                             "#F5F5F5"), # gray for non-recurrence points
+                    breaks=c(TRUE, FALSE)) +
+  geom_abline(intercept = 0, slope = 1) # add line of incidence
+  
+  # add rugs
+  plot_data <- cbind(d_use$parent_data, d_use$child_data) %>%   
+  as.data.frame() %>%
+  rowid_to_column("utterance_order") %>% 
+  mutate(x_binary = ifelse(V1 == 1, utterance_order, NA), # NA to ensure no rug mark appears when number talk is *not* being used
+         y_binary = ifelse(V2 == 1, utterance_order, NA)
+         ) %>%
+  # add rug colors for each speaker
+  mutate(rug_color = ifelse(!is.na(x_binary) & is.na(y_binary), "red", # child
+                            ifelse(!is.na(y_binary) & is.na(x_binary), "blue", # parent
+                                   NA) 
+                            )
+         )
+  
+  recurrence_plot <- recurrence_plot + 
+    geom_rug(inherit.aes = FALSE, # ensure that the mapping from above does not get combined
+             data = plot_data,
+             mapping = aes(x = as.numeric(x_binary), 
+                           y = as.numeric(y_binary),
+                           color = as.character(rug_color))) +
+    scale_color_manual(values=c("red", # red for child
+                                "blue")) # blue for parent
+  
+  # adjust rp aesthetics
+  recurrence_plot <- recurrence_plot +
+  # adjust RP aesthetics
+    theme(axis.line = element_blank(), # remove axis lines/tick marks
+        legend.position = "none") +  # remove legend
+    coord_equal() + # make square
+    labs(x = "Parent event series", y = "Child event series") # add axis labels
+  
+  # show plot
+  recurrence_plot
+}
+```
+
+
+### Example dyad 1
+
+```{r}
+make_recurrence_plot(d, "Dyad1")
+```
+
+
+
+### Example dyad 2
+
+```{r}
+make_recurrence_plot(d, "Dyad2")
+```
+
+
+### Example dyad 3
+
+```{r}
+make_recurrence_plot(d, "Dyad3")
+```
+
+### Example dyad 4
+
+```{r}
+make_recurrence_plot(d, "Dyad4")
+```
+
