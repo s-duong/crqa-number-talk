@@ -4,5 +4,5 @@ R code used in the case study of applying categorical cross-recurrence quantific
 
 Links:
 
-* [HTML-rendered R Markdown](https://s-duong.github.io/crqa-number-talk/CRQA_of_Number_Talk.html)
+* [HTML-rendered R Markdown](https://s-duong.github.io/crqa-number-talk/CRQA_Tutorial.html)
 * [Code only](https://github.com/s-duong/crqa-number-talk)
