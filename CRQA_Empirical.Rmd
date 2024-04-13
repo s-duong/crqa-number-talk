@@ -1,0 +1,828 @@
+---
+title: "Cross-recurrence quantification analysis of caregiver-child number talk"
+date: "Last updated: 04/13/24"
+author: "By: Shirley Duong (shd77@pitt.edu, shirleyduong5@gmail.com)"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+This document reports on an application of categorical cross-recurrence quantification analysis (CRQA) to number- and math-related conversations (i.e., number talk) between parents and their preschool-aged children using the ['crqa' package](https://cran.r-project.org/web/packages/crqa/crqa.pdf) ([Coco et al., 2021](https://journal.r-project.org/archive/2021/RJ-2021-062/RJ-2021-062.pdf)). Additionally, relations between the CRQA-derived measures and children's math, language, and executive functioning skills were examined.  
+
+This analysis is presented in the article, "Dynamic structures of parent-child number talk: An application of categorical cross-recurrence quantification analysis and companion to Duong et al. (under review)."
+
+**General steps**:
+
+-   Describe the sample of parent-child dyads.
+-   Set up and run CRQA on parent-child number talk.  
+-   Extract CRQA measures, e.g., percent recurrence.
+-   Generate recurrence plots of several examples.
+-   Impute child assessment data.
+-   Model relations between CRQA-derived measures and child outcomes.
+
+
+First, import the necessary libraries to carry out the steps above.
+
+```{r import libraries, warning=FALSE, message=FALSE}
+# data manipulation
+library(tidyverse)  
+library(reshape) # for melting data to generate recurrence plots
+
+# descriptives 
+library(psych) 
+
+# correlations
+library(Hmisc) # for correlation function
+
+# plotting and displays
+library(ggplot2)
+library(knitr) 
+library(gridExtra)
+
+# recurrence analysis
+library(crqa)
+
+# missing data 
+library(visdat) # for visualizing missingness
+library(mice) # for imputation
+library(miceadds) # for pooling functions
+```
+
+Import event series data (`d`) and parent demographics and child outcomes data (`o`).
+
+```{r import data}
+d <- read.csv("Number_Talk_Event_Series.csv")
+o <- read.csv("Parent_Child_Outcomes.csv")
+```
+
+# Sample description
+
+## Demographics
+
+Parents in this sample were mostly mothers.
+
+```{r describe sample relation}
+o %>% 
+  count(relation_to_child) %>%
+  mutate(prop = n/sum(n))
+```
+
+Parents in this sample were mostly White and non-Hispanic, followed by Black, Asian, and multiracial or another reported race or ethnicity.
+
+```{r describe sample race ethnicity}
+o %>% 
+  count(parent_race_ethnicity) %>%
+  mutate(prop = n/sum(n))
+```
+
+Most parents in this sample had at least a Bachelors degree.  
+
+```{r describe sample education category}
+o %>% 
+  count(parent_education_category) %>%
+  mutate(prop = n/sum(n))
+```
+
+On average, parents in this sample completed 16 years of schooling. Families' yearly household income ranged from 5,000 to 350,000 USD and children were 4.40 years old on average.  
+
+```{r describe sample education income age}
+o %>% dplyr::select(parent_education_years, family_yearly_income, child_age) %>%
+  psych::describe() %>% as.data.frame() %>%
+  dplyr::select(n, mean, sd, median, min, max, skew, kurtosis, se)
+```
+
+## Talk and child outcomes
+
+Parent and child (number) utterances and children's math, language, and executive functioning skills varied considerably.  
+
+```{r describe sample talk and child outcomes}
+out <- o %>%
+  dplyr::select(total_parent_utterances, total_child_utterances,
+                parent_number_utterances, child_number_utterances,
+                child_math, child_vocabulary,
+                child_executive_function, child_age)
+
+out <- psych::describe(out) %>% 
+  as.data.frame() %>% 
+  dplyr::select(n, mean, sd, median, min, max, skew, kurtosis, se)
+
+# make table pretty
+colnames(out) = c("n", "Mean", "SD", "median", "Min", "Max", "Skew", "Kurtosis", "SE")
+row.names(out) = c("Total parent utterances", "Total child utterances",
+"Parent number utterances", "Child number utterances",
+"Child math", "Child vocabulary", "Child executive function", "Child age")
+
+# show table
+kable(out, digits=2)
+```
+
+# Set-up CRQA
+
+Event series variables (in `d`):
+
+-   `preID`: Dyad identifier
+-   `timepoint`: The order in which the parent or child utterance appeared in the conversation; takes on values of 1 to the total number of utterances spoken in each interaction
+-   `source`: Speaker, **p** = *parent*, **c** = *child*
+-   `parent_ts`: Event series of parent utterances, coded as **1** = *engaging in number talk*, **2** = *non-number talk*, **3** = *parent non-number talk*, or **5** = *no utterance from the parent during non-NT of the child*
+-   `child_ts`: Event series of child utterances, coded as **1** = *engaging in number talk*, **2** = *non-number talk*, **4** = *child non-number talk*, or **6** = *no utterance from the child during non-NT of the parent*
+
+```{r glimpse data}
+d %>% glimpse()
+```
+
+Specify CRQA hyperparameters. For this analysis, we used a radius (`radius` argument in `crqa()`) of .5, a delay (`delay`) of 0, and an embedded dimension (`embed`) of 1.
+
+```{r crqa hyperparameters}
+radius_value = .5
+delay_value = 0
+embedding_value = 1
+```
+
+# Run CRQA
+
+Use the `crqa()` function from the 'crqa' package to run the recurrence analysis.
+
+## Example data
+
+Run CRQA on a segment of one parent-child conversation to show the process and output. The output contains the values of 10 recurrence measures (e.g., `$RR`) and 1 matrix that visually indicates recurrent points with lines (`$RP`). 
+
+```{r crqa example}
+# parent and child event series
+example_parent_ts <- c(3, 2, 1, 1, 2, 1, 3, 5, 1, 2, 1, 1, 5, 1, 1)
+example_child_ts <- c(6, 1, 2, 2, 1, 2, 6, 4, 2, 1, 2, 2, 4, 2, 2)
+
+# run crqa
+example_analysis <- crqa(example_parent_ts,
+                         example_child_ts,
+                         radius = radius_value,
+                         delay = delay_value, 
+                         embed = embedding_value, 
+                         
+                         # below are default arguments
+                         rescale = 0, # do *not* rescale
+                         normalize = 0, # do *not* normalize
+                         mindiagline = 2, # minimum diagonal length of recurrent points
+                         minvertline = 2 # minimum vertical length of recurrent points
+                         )
+
+# show output
+example_analysis
+```
+
+## Descriptive analysis data
+
+Apply `crqa()` to the case study data for each parent-child dyad using `group_by()`. Extract the **recurrence rate** (`RR`), **percent determinism** (`DET`), **mean diagonal line** (`meanL`), **laminarity** (`LAM`), and **trapping time** (`TT`) by accessing those attributes of the CRQA output with `$`. Assign to a new dataframe where each row corresponds to one parent-child dyad.
+
+```{r crqa real}
+d_crqa <- d %>% 
+  group_by(preID) %>%
+  summarise(RR = crqa(parent_ts, child_ts, 
+                      radius = radius_value, 
+                      delay = delay_value, 
+                      embed = embedding_value)$RR,
+            DET = crqa(parent_ts, child_ts, 
+                       radius = radius_value, 
+                       delay = delay_value, 
+                       embed = embedding_value)$DET,
+            meanL = crqa(parent_ts, child_ts, 
+                         radius = radius_value, 
+                         delay = delay_value, 
+                         embed = embedding_value)$L,
+            LAM = crqa(parent_ts, child_ts, 
+                       radius = radius_value, 
+                       delay = delay_value, 
+                       embed = embedding_value)$LAM,
+            TT = crqa(parent_ts, child_ts, 
+                      radius = radius_value, 
+                      delay = delay_value, 
+                      embed = embedding_value)$TT
+            )
+
+# change all NAs to 0s
+d_crqa[is.na(d_crqa)] <- 0
+
+# glimpse at the new dataframe
+d_crqa %>% glimpse()
+```
+
+# Descriptives
+
+CRQA measures of interest:
+
+-   **Recurrence rate** (`RR`): Percentage of recurrent points in a RP. How often is number talk co-occurring or being reciprocated?
+-   **Determinism** (`DET`): Percentage of recurrent points that form diagonal lines. How often do parents and children follow each others's number utterances or engage in "back and forth" number exchanges?
+-   **Average diagonal line** (`meanL`) - Mean length of diagonal lines  or number exchanges.
+-   **Laminarity** (`LAM`) -- Percentage of recurrent points that form vertical (or horizontal) lines. How often does one speaker use consecutive number utterances after the other person introduces or uses number talk?
+-   **Trapping time** (`TT`) - Average length of vertical lines.  
+
+Obtain descriptive statistics of the CRQA measures using the `describe()` function from the 'psych' package. 
+
+```{r crqa summary}
+crqa_summary <- d_crqa %>% 
+  dplyr::select(-preID) %>%
+  psych::describe() %>% 
+  as.data.frame() %>%
+  dplyr::select(n, mean, sd, median, min, max, skew, kurtosis, se) 
+
+# make table pretty
+colnames(crqa_summary) = c("n", "Mean", "SD", "median", "Min", "Max", "Skew", "Kurtosis", "SE")
+
+row.names(crqa_summary) = c("Recurrence rate", "Determinism", "Mean diagonal line", "Laminarity", "Trapping time")
+
+# show table
+kable(crqa_summary, digits = 2)
+```
+
+Visualize the distributions of the measures.
+
+```{r crqa histograms}
+# plot histograms in a grid
+grid.arrange(
+  
+  # recurrence rate
+  d_crqa %>% ggplot(mapping = aes(x = RR)) +
+  geom_histogram(binwidth = .5,
+                 color = "#6FAC47", fill = "#C5E0B4"),
+  
+  # determinism
+  d_crqa %>% ggplot(mapping = aes(x = DET)) +
+  geom_histogram(binwidth = 2.5,
+                 color = "#6FAC47", fill = "#C5E0B4"),
+  
+  # mean diagonal line
+  d_crqa %>% ggplot(mapping = aes(x = meanL)) +
+  geom_histogram(binwidth = .25,
+                 color = "#6FAC47", fill = "#C5E0B4"),
+  
+  # laminarity
+  d_crqa %>% ggplot(mapping = aes(x = LAM)) +
+  geom_histogram(binwidth = 4,
+                 color = "#6FAC47", fill = "#C5E0B4"),
+  
+  # trapping time
+  d_crqa %>% ggplot(mapping = aes(x = TT)) +
+  geom_histogram(binwidth = .5,
+                 color = "#6FAC47", fill = "#C5E0B4"),
+  
+  # grid arrangement
+  layout_matrix = rbind(c(1, NA), # NA specifies that no plot should be in that location 
+                        c(2,3),
+                        c(4,5))
+)
+```
+
+Note that `meanL` and `TT` cannot take one values of 1; the minimum length of diagonal and vertical lines is 2.
+
+# Recurrence plots
+
+Generate recurrence plots (RPs) for **six** example conversations: one with a relatively high RR, one with RR = 0 (but includes parent number talk), and four with relatively similar frequencies of parent number utterances but differing RR, DET, and/or LAM.  
+
+**Reading the plots**:
+
+-   The parent event series is plotted along the x-axis and the child event series is plotted along the y-axis.
+-   The blue (parent) and red (child) rug marks (thin lines) along the axes represent whether a number utterance occurred at a particular point in time. This can be summarized to show the *frequency* of number talk.
+-   The purple areas on the plot represent when number talk co-occurred. This can be summarized to show the *reciprocity* of number talk.
+-   The black diagonal line is the line of incidence, which reflects when talk occurs at the same moment in time. In our case of conversational exchanges, recurrence along this line is not present, so this appears on the plot just for reference.
+
+## Example data
+
+Generate the RP of the example data to show the process and output. 
+
+
+First, extract the RP from the example and reshape the data so that there are 3 columns: the parent event series, the child event series, and `value` which indicates whether each pair of parent-child utterances is a recurrent point. Also, the number of rows should equal the square of the length of the event series. In this case, it's 15 squared or 225.
+
+```{r rp example matrix}
+# extract RP from the crqa output
+recurrence_matrix <- melt(as.matrix(example_analysis$RP), 
+                          varnames = c("example_child_ts", "example_parent_ts"))
+
+recurrence_matrix %>% glimpse()
+```
+
+Then, use ggplot's `geom_raster()` to generate the RP (showing the *recurrence* of number talk).
+
+```{r rp example raster}
+recurrence_plot <- recurrence_matrix %>%
+  ggplot(mapping = aes(x = example_parent_ts, 
+                       y = example_child_ts, 
+                       fill = value)  
+         ) +
+  geom_raster() + 
+  scale_fill_manual(values=c("#a269db", # purple for recurrent points
+                             "#F5F5F5"), # gray for non-recurrence points
+                    breaks=c(TRUE, FALSE)) +
+  geom_abline(intercept = 0, slope = 1) # add line of incidence
+
+# recurrence_plot
+```
+
+Generate the data for the rugs (showing the *occurrence* of number talk) and then add to the RP.
+
+```{r rp example rugs}
+# first combine event series into a data frame
+plot_data <- cbind(example_parent_ts, example_child_ts) %>%   
+  as.data.frame() %>%
+  rowid_to_column("utterance_order") %>% 
+  mutate(x_binary = ifelse(example_parent_ts == 1, utterance_order, NA), # NA to ensure no rug mark appears when number talk is *not* being used
+         y_binary = ifelse(example_child_ts == 1, utterance_order, NA)
+         ) %>%
+  # add rug colors for each speaker
+  mutate(rug_color = ifelse(!is.na(x_binary) & is.na(y_binary), "red", # child
+                            ifelse(!is.na(y_binary) & is.na(x_binary), "blue", NA) # parent
+                            )
+         )
+
+# add rugs to the axes
+recurrence_plot <- recurrence_plot + 
+  geom_rug(inherit.aes = FALSE, # ensure that the mapping from above does not get combined
+           data = plot_data,
+           mapping = aes(x = x_binary, 
+                         y = y_binary,
+                         color = rug_color)) +
+  scale_color_manual(values=c("#D70040", # red for child
+                              "#0096FF")) # blue for parent
+
+# recurrence_plot
+```
+
+Adjust the RP aesthetics and display the plot.
+
+```{r rp example aes}
+recurrence_plot <- recurrence_plot +
+  # adjust RP aesthetics
+  theme(axis.line = element_blank(), # remove axis lines/tick marks
+        legend.position = "none") +  # remove legend
+  coord_equal() + # make square
+  labs(x = "Parent event series", y = "Child event series") # add axis labels
+
+# show plot
+recurrence_plot
+```
+
+
+## Generate RP function
+
+Write a function with the code above to create RPs.
+
+```{r rp function}
+make_recurrence_plot <- function(data, chosen_dyad){
+  
+  # subset data
+  d_use <- data %>% filter(preID == chosen_dyad)
+  
+  # run crqa
+  crqa_output <- crqa(d_use$parent_ts,
+                      d_use$child_ts,
+                      radius = radius_value, 
+                      delay = delay_value, 
+                      embed = embedding_value)
+  
+  # extract recurrence plot from crqa output
+  if(class(crqa_output$RP) == "logical"){ # if RR = 0...
+    
+    # the crqa() function does not supply an RP if there is no recurrence
+    # in these cases, the class of $RP is "logical", not a matrix
+    # so we need to supply a matrix for these cases
+    # the matrix needs to have the same dimensions as the total number of utterances in the conversation
+    
+    child_ts_zeroRR <- c(1:nrow(d_use))
+    parent_ts_zero_RR <- c(1:nrow(d_use))
+    
+    # generate all possible combinations of time points 
+    recurrence_matrix <- expand.grid(child_ts_zeroRR, parent_ts_zero_RR) %>%
+      as.data.frame() %>%
+      mutate(value = FALSE) %>% # specify no recurrence at all pairs of time points
+      dplyr::rename(child_ts = Var1,
+                    parent_ts = Var2)
+   
+  } else {
+    # else use the RP provided by crqa() and reshape data
+    recurrence_matrix <- melt(as.matrix(crqa_output$RP), 
+                          varnames = c("child_ts", "parent_ts"))
+    
+  }
+  
+  
+  # generate rp using geom_raster()
+  recurrence_plot <- recurrence_matrix %>%
+  ggplot(mapping = aes(x = parent_ts, 
+                       y = child_ts, 
+                       fill = value)  
+         ) +
+  geom_raster() + 
+  scale_fill_manual(values=c("#a269db", # purple for recurrent points
+                             "#F5F5F5"), # gray for non-recurrence points
+                    breaks=c(TRUE, FALSE)) +
+  geom_abline(intercept = 0, slope = 1) # add line of incidence
+  
+  # add rugs
+  plot_data <- cbind(d_use$parent_ts, d_use$child_ts) %>%   
+  as.data.frame() %>%
+  rowid_to_column("utterance_order") %>% 
+  mutate(x_binary = ifelse(V1 == 1, utterance_order, NA), # NA to ensure no rug mark appears when number talk is *not* being used
+         y_binary = ifelse(V2 == 1, utterance_order, NA)
+         ) %>%
+  # add rug colors for each speaker
+  mutate(rug_color = ifelse(!is.na(x_binary) & is.na(y_binary), "red", # child
+                            ifelse(!is.na(y_binary) & is.na(x_binary), "blue", # parent
+                                   NA) 
+                            )
+         )
+  
+  recurrence_plot <- recurrence_plot + 
+    geom_rug(inherit.aes = FALSE, # ensure that the mapping from above does not get combined
+             data = plot_data,
+             mapping = aes(x = as.numeric(x_binary), 
+                           y = as.numeric(y_binary),
+                           color = as.character(rug_color))) +
+    scale_color_manual(values=c("#D70040", # red for child
+                                "#0096FF")) # blue for parent
+  
+  # adjust rp aesthetics
+  recurrence_plot <- recurrence_plot +
+  # adjust RP aesthetics
+    theme(axis.line = element_blank(), # remove axis lines/tick marks
+        legend.position = "none") +  # remove legend
+    coord_equal() + # make square
+    labs(x = "Parent event series (Time point)", y = "Child event series (Time point)") # add axis labels
+  
+  # show plot
+  recurrence_plot
+}
+```
+
+## Descriptive analysis data
+
+### Summary statistics
+
+Display the values of the CRQA-derived measures and frequencies of (number) talk for the example dyads. 
+
+
+```{r example dyads table}
+# list of dyad IDs
+example_dyad_IDs <- c(46, 63, 89, 53, 55, 116)
+
+# obtain relevant data
+example_dyads <- merge(
+  
+  # frequencies of talk
+  o %>% filter(preID %in% example_dyad_IDs) %>%
+    dplyr::select(preID, total_parent_utterances, total_child_utterances,
+                  parent_number_utterances, child_number_utterances),
+  
+  # crqa measures
+  d_crqa %>% filter(preID %in% example_dyad_IDs) %>%
+    dplyr::select(preID, RR, DET, meanL, LAM, TT),
+  
+  # key
+  by = "preID"
+  
+)
+
+# transpose table
+example_dyads <- t(example_dyads) 
+
+# reorder cols so dyads appear in the same order as article
+example_dyads <- example_dyads %>% 
+  as.data.frame() %>%
+  dplyr::select(V1, V4, V5, V2, V3, V6)
+
+# remove `preID` row and rename cols and rows
+example_dyads <- example_dyads[-1,]
+
+colnames(example_dyads) = c("1", "2", "3", "4", "5", "6")
+
+row.names(example_dyads) = c("Total parent utterances", "Total child utterances",
+                             "Parent number utterances", "Child number utterances",
+                             "Recurrence rate (%)", "Determinism (%)", 
+                             "Mean diagonal line",
+                             "Laminarity (%)", "Trapping time"
+                             )
+
+# show table
+kable(example_dyads, digits=2)
+```
+
+### Example dyad 1
+
+**High number talk (NT) frequencies, high RR**  
+
+Total parent utterances = 134, total child utterances = 56, parent NT = 50, child NT = 27, RR = 7.33, DET = 33.18, meanL = 2.39, LAM = 34.47, TT = 2.44.
+
+```{r example dyad 1}
+make_recurrence_plot(d, 46)
+```
+
+### Example dyad 2
+
+**Low NT frequencies, zero RR**  
+
+Only one person used number talk in this conversation. This was the case for **5** dyads in the sample. Total parent utterances = 112, total child utterances = 112, parent NT = 6, child NT = 0.
+
+```{r example dyad 2}
+make_recurrence_plot(d, 63)
+```
+
+### Example dyad 3
+
+**Average NT frequencies, low RR**  
+
+Total parent utterances = 160, total child utterances = 106, parent NT = 23, child NT = 6, RR = .28, DET = 1.45, meanL = 2, LAM = 26.09, TT = 3.
+
+```{r example dyad 3}
+make_recurrence_plot(d, 89)
+```
+
+### Example dyad 4
+
+**Average NT, average RR, high LAM**  
+
+Total parent utterances = 144, total child utterances = 108, parent NT = 21, child NT = 16, RR = 1.06, DET = 35.71, meanL = 3, LAM = 63.69, TT = 4.76. 
+
+```{r example dyad 4}
+make_recurrence_plot(d, 53)
+```
+
+### Example dyad 5
+
+**Average NT, average RR, low DET**  
+
+Total parent utterances = 164, total child utterances = 115, parent NT = 25, child NT = 17, RR = 1.09, DET = 5.18, meanL = 2, LAM = 17.88, TT = 2. 
+
+```{r example dyad 5}
+make_recurrence_plot(d, 55)
+```
+
+### Example dyad 6
+
+**Average NT, average RR, high DET**  
+
+Total parent utterances = 89, total child utterances = 75, parent NT = 17, child NT = 10, RR = 1.26, DET = 54.71, meanL = 2.11, LAM = 23.53, TT = 2. 
+
+```{r example dyad 6}
+make_recurrence_plot(d, 116)
+```
+
+# Inferential statistics
+
+```{r combine data sources}
+all_data <- merge(d_crqa, o, by = "preID", all = TRUE)
+```
+
+## Missing data imputation
+
+Visualize patterns of missing data.
+
+```{r vis missing data}
+vis_miss(all_data %>%
+           dplyr::select(child_math, child_vocabulary, child_executive_function))
+```
+
+Perform missing data imputation using `mice()` from the 'mice' package. Several complete datasets will be created that draw from the distribution of the existing data. First, set the predictor matrix, which indicates which variables are going to be used to predict the values of the missing data.  
+
+```{r setup imputation}
+# make copy of dataset
+all_data_use <- all_data
+
+# first, run with 0 iterations
+imp <- mice(all_data_use, maxit=0)
+
+# extract the predictor matrix and methods of imputation
+predM = imp$predictorMatrix
+meth = imp$method
+
+# set predictor matrix
+# 0 = variable is *not* used to predict missing values
+predM[, c("preID")] = 0
+predM[, c("RR")] = 0
+predM[, c("DET")] = 0
+predM[, c("meanL")] = 0
+predM[, c("LAM")] = 0
+predM[, c("TT")] = 0
+```
+
+Impute missing data (5 iterations) and store imputed datasets in one list for later use in pooled regressions.
+
+```{r run imputation}
+imp_data <- mice(all_data_use, 
+                 m = 40, # iterations
+                 method = c("sample"), 
+                 seed = 123,
+                 print = FALSE)
+
+# summary(imp_data)
+
+# to view the imputed values, use head()
+# head(imp_data$imp$child_math)
+# head(imp_data$imp$child_vocabulary)
+# head(imp_data$imp$child_executive_function)
+
+# create separate data frame for each imputed data set
+imp_data1 <- complete(imp_data, 1)
+imp_data2 <- complete(imp_data, 2)
+imp_data3 <- complete(imp_data, 3)
+imp_data4 <- complete(imp_data, 4)
+imp_data5 <- complete(imp_data, 5)
+
+#create list of imputed datasets
+imp_all <- miceadds::mids2datlist(imp_data)
+```
+
+## Analytical plan
+
+-   Run zero-order correlations between all language input variables.
+-   Then, estimate stepwise linear regressions predicting child outcomes. In the first step, use total parent and child number talk and child age as predictors (**Models 1**). In the second step, add the percentage recurrence measures, i.e., RR, DET, and LAM (**Models 2**).
+
+## Zero-order correlations
+
+```{r get corrs}
+set.seed(123)
+
+# correlations with prob of group membership
+corr_vars <- colnames(all_data %>% dplyr::select(
+  RR:child_age
+  )
+)
+
+set.seed(123)
+
+corrs <- miceadds::micombine.cor(mi.res = imp_data, 
+                                 variables = corr_vars)
+
+
+# reorder values
+corrs$variable1 <- factor(corrs$variable1, 
+                          levels = corr_vars)
+corrs$variable2 <- factor(corrs$variable2, 
+                          levels = corr_vars)
+
+
+# indicate p-values
+corrs <- corrs %>%
+  mutate(p_value = ifelse(p < .05 & p >= 0.01, "p < .05", 
+                          ifelse(p < 0.01 & p >= .001, "p < .01",
+                                 ifelse(p < .001 & p >= 0, "p < .001",
+                                        "p >= .05")
+                                 )
+                          )
+         )
+
+corrs_p <- corrs %>%
+  mutate(r_all = r,
+         r = ifelse(p_value == "p >= .05", NA, r_all))
+
+
+
+```
+
+
+Visualize correlations. Colors correspond to the *p*-values corresponding to the associations. 
+
+```{r}
+corrs_p %>%
+  ggplot(mapping = aes(x = variable1, y = variable2)) +
+  geom_tile(mapping = aes(fill = p_value), 
+            color = "black"  
+            ) +
+  coord_equal() +
+  scale_fill_manual(values = c("#40bf40", "#8cd98c", "#c6ecc6", "darkgrey")) +
+  labs(x = "", y = "") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5))
+```
+
+All coefficients.
+
+```{r}
+corrs %>%
+  ggplot(mapping = aes(x = variable1, y = variable2)) +
+  geom_tile(fill = "white",
+            color = "black"  
+            ) +
+  geom_text(mapping = aes(label = round(r, 2)),
+            size = 3) +
+  labs(x = "", y = "") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5))
+```
+
+
+
+
+## Models 1
+
+In step one, only total number talk and child age used as predictors.
+
+### Child math
+
+```{r model 1 math}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_math) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_math) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+```
+
+### Child vocabulary
+
+```{r model 1 vocabulary}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_vocabulary) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_vocabulary) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+```
+
+### Child executive function
+
+```{r model 1 executive function}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_executive_function) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_executive_function) ~  scale(all_number_utterances) + scale(child_age)))
+  )
+)
+```
+
+## Models 2
+
+Three of the percentage CRQA measures (i.e., RR, DET, and LAM) were added in step 2.
+
+### Child math
+
+```{r model 2 math}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_math) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM))) 
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_math) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM)))
+  )
+)
+```
+
+### Child vocabulary
+
+```{r model 2 vocabulary}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_vocabulary) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM))) 
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_vocabulary) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM)))
+  )
+)
+```
+
+### Child executive function
+
+```{r model 2 executive function}
+# pooled regression summary
+summary(
+  pool(
+    with(imp_all, lm(scale(child_executive_function) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM))) 
+  )
+)
+
+# pooled R-squared
+pool.r.squared(
+  pool(
+    with(imp_all, lm(scale(child_executive_function) ~  scale(all_number_utterances) + scale(child_age) + scale(RR) + scale(DET) + scale(LAM)))
+  )
+)
+```
